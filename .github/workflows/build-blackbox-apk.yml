@@ -9,25 +9,71 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.11.1'
+
+      - name: Locate Android build tools
+        run: |
+          BT_VERSION="$(ls -1 "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
+          echo "BUILD_TOOLS=$ANDROID_HOME/build-tools/$BT_VERSION" >> "$GITHUB_ENV"
+          test -x "$ANDROID_HOME/build-tools/$BT_VERSION/apksigner"
+          test -x "$ANDROID_HOME/build-tools/$BT_VERSION/zipalign"
+
       - name: Check vault JavaScript
         run: node --check app/src/main/assets/app.js
+
       - name: Build unsigned release APK
         run: gradle :app:assembleRelease --stacktrace
-      - name: Verify unsigned APK
+
+      - name: Create signing key
+        shell: bash
         run: |
-          test -f app/build/outputs/apk/release/app-release-unsigned.apk
-          unzip -t app/build/outputs/apk/release/app-release-unsigned.apk >/dev/null
-      - name: Rename APK
-        run: cp app/build/outputs/apk/release/app-release-unsigned.apk Blackbox-Vault-unsigned.apk
+          set -euo pipefail
+          PASS="$(openssl rand -hex 24)"
+          echo "::add-mask::$PASS"
+          keytool -genkeypair -noprompt             -keystore blackbox-vault.jks             -storepass "$PASS"             -keypass "$PASS"             -alias blackbox             -keyalg RSA             -keysize 3072             -validity 36500             -dname "CN=Blackbox Vault,O=Personal App"
+          printf 'alias=blackbox\nstore_password=%s\nkey_password=%s\n' "$PASS" "$PASS" > BLACKBOX_SIGNING_INFO.txt
+
+      - name: Align and sign APK with v1 v2 v3
+        shell: bash
+        run: |
+          set -euo pipefail
+          PASS="$(sed -n 's/^store_password=//p' BLACKBOX_SIGNING_INFO.txt)"
+          "$BUILD_TOOLS/zipalign" -f -p 4             app/build/outputs/apk/release/app-release-unsigned.apk             Blackbox-Vault-aligned.apk
+          "$BUILD_TOOLS/apksigner" sign             --ks blackbox-vault.jks             --ks-key-alias blackbox             --ks-pass "pass:$PASS"             --key-pass "pass:$PASS"             --v1-signing-enabled true             --v2-signing-enabled true             --v3-signing-enabled true             --out Blackbox-Vault-1.1.2.apk             Blackbox-Vault-aligned.apk
+
+      - name: Verify installable APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          unzip -t Blackbox-Vault-1.1.2.apk >/dev/null
+          "$BUILD_TOOLS/zipalign" -c -v 4 Blackbox-Vault-1.1.2.apk >/dev/null
+          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs Blackbox-Vault-1.1.2.apk | tee verify.txt
+          grep -q "Verified using v2 scheme (APK Signature Scheme v2): true" verify.txt
+          grep -q "Verified using v3 scheme (APK Signature Scheme v3): true" verify.txt
+          sha256sum Blackbox-Vault-1.1.2.apk > Blackbox-Vault-1.1.2.sha256
+
       - uses: actions/upload-artifact@v4
         with:
-          name: Blackbox-Vault-Unsigned
-          path: Blackbox-Vault-unsigned.apk
+          name: Blackbox-Vault-1.1.2-APK
+          path: |
+            Blackbox-Vault-1.1.2.apk
+            Blackbox-Vault-1.1.2.sha256
+            verify.txt
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Blackbox-Vault-Signing-Key
+          path: |
+            blackbox-vault.jks
+            BLACKBOX_SIGNING_INFO.txt
+          retention-days: 1
           if-no-files-found: error
