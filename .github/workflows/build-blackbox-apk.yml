@@ -4,6 +4,10 @@ on:
     branches: [ blackbox-vault-apk ]
   workflow_dispatch:
 
+permissions:
+  contents: read
+  actions: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -32,48 +36,47 @@ jobs:
       - name: Build unsigned release APK
         run: gradle :app:assembleRelease --stacktrace
 
-      - name: Create signing key
-        shell: bash
+      - name: Restore persistent signing key from 1.1.2
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          PASS="$(openssl rand -hex 24)"
-          echo "::add-mask::$PASS"
-          keytool -genkeypair -noprompt             -keystore blackbox-vault.jks             -storepass "$PASS"             -keypass "$PASS"             -alias blackbox             -keyalg RSA             -keysize 3072             -validity 36500             -dname "CN=Blackbox Vault,O=Personal App"
-          printf 'alias=blackbox\nstore_password=%s\nkey_password=%s\n' "$PASS" "$PASS" > BLACKBOX_SIGNING_INFO.txt
+          mkdir -p signer
+          gh run download 36201748340             --repo "$GITHUB_REPOSITORY"             --name Blackbox-Vault-Signing-Key             --dir signer
+          test -f signer/blackbox-vault.jks
+          test -f signer/BLACKBOX_SIGNING_INFO.txt
 
-      - name: Align and sign APK with v1 v2 v3
+      - name: Align and sign APK
         shell: bash
         run: |
           set -euo pipefail
-          PASS="$(sed -n 's/^store_password=//p' BLACKBOX_SIGNING_INFO.txt)"
+          PASS="$(sed -n 's/^store_password=//p' signer/BLACKBOX_SIGNING_INFO.txt)"
+          echo "::add-mask::$PASS"
+
           "$BUILD_TOOLS/zipalign" -f -p 4             app/build/outputs/apk/release/app-release-unsigned.apk             Blackbox-Vault-aligned.apk
-          "$BUILD_TOOLS/apksigner" sign             --ks blackbox-vault.jks             --ks-key-alias blackbox             --ks-pass "pass:$PASS"             --key-pass "pass:$PASS"             --v1-signing-enabled true             --v2-signing-enabled true             --v3-signing-enabled true             --out Blackbox-Vault-1.1.2.apk             Blackbox-Vault-aligned.apk
+
+          "$BUILD_TOOLS/apksigner" sign             --ks signer/blackbox-vault.jks             --ks-key-alias blackbox             --ks-pass "pass:$PASS"             --key-pass "pass:$PASS"             --v1-signing-enabled true             --v2-signing-enabled true             --v3-signing-enabled true             --out Blackbox-Vault-1.1.3.apk             Blackbox-Vault-aligned.apk
 
       - name: Verify installable APK
         shell: bash
         run: |
           set -euo pipefail
-          unzip -t Blackbox-Vault-1.1.2.apk >/dev/null
-          "$BUILD_TOOLS/zipalign" -c -v 4 Blackbox-Vault-1.1.2.apk >/dev/null
-          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs Blackbox-Vault-1.1.2.apk | tee verify.txt
+          unzip -t Blackbox-Vault-1.1.3.apk >/dev/null
+          "$BUILD_TOOLS/zipalign" -c -v 4 Blackbox-Vault-1.1.3.apk >/dev/null
+          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs Blackbox-Vault-1.1.3.apk | tee verify.txt
           grep -q "Verified using v2 scheme (APK Signature Scheme v2): true" verify.txt
           grep -q "Verified using v3 scheme (APK Signature Scheme v3): true" verify.txt
-          sha256sum Blackbox-Vault-1.1.2.apk > Blackbox-Vault-1.1.2.sha256
+          "$BUILD_TOOLS/aapt" dump badging Blackbox-Vault-1.1.3.apk | tee badging.txt
+          grep -q "package: name='com.blackbox.vault.app'" badging.txt
+          grep -q "versionName='1.1.3'" badging.txt
+          sha256sum Blackbox-Vault-1.1.3.apk > Blackbox-Vault-1.1.3.sha256
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Blackbox-Vault-1.1.2-APK
+          name: Blackbox-Vault-1.1.3-APK
           path: |
-            Blackbox-Vault-1.1.2.apk
-            Blackbox-Vault-1.1.2.sha256
+            Blackbox-Vault-1.1.3.apk
+            Blackbox-Vault-1.1.3.sha256
             verify.txt
-          if-no-files-found: error
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Blackbox-Vault-Signing-Key
-          path: |
-            blackbox-vault.jks
-            BLACKBOX_SIGNING_INFO.txt
-          retention-days: 1
+            badging.txt
           if-no-files-found: error
